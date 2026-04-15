@@ -10,124 +10,52 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from elasticsearch import Elasticsearch
+from elasticsearch import (
+    AuthenticationException,
+    AuthorizationException,
+    BadRequestError,
+    ConnectionError,
+    Elasticsearch,
+    NotFoundError,
+    SSLError,
+)
 from flask import Flask, jsonify, request, send_from_directory
 from openai import OpenAI
 
 
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
+DEFAULT_LIMIT = 300
+MAX_LIMIT = 1000
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
 IP_PATTERN = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
-ISO_TIMESTAMP_PATTERN = re.compile(r"\b\d{4}-\d{2}-\d{2}[T ][0-9:.+-Z]+\b")
+TIME_PATTERN = re.compile(r"\b\d{4}-\d{2}-\d{2}[T ][0-9:.+-Z]+\b")
 
-APP_STATE: dict[str, Any] = {
-    "es_config": {
+KEYWORDS = {
+    "critical": ("ransomware", "malware", "sql injection", "reverse shell", "credential dumping"),
+    "high": ("unauthorized", "brute force", "powershell", "port scan", "xss", "lateral movement"),
+    "warning": ("failed", "error", "timeout", "warning", "blocked", "anomaly"),
+}
+
+STATE: dict[str, Any] = {
+    "source": "none",
+    "es": {
         "url": "",
         "username": "",
         "password": "",
         "index": "logs-*",
+        "connected": False,
+        "error": "",
     },
-    "active_source": "sample",
-    "custom_logs": [],
-    "custom_label": "Built-in sample logs",
+    "uploaded_logs": [],
+    "uploaded_label": "Uploaded logs",
 }
-
-KEYWORD_RULES = {
-    "critical": [
-        "ransomware",
-        "malware",
-        "data exfiltration",
-        "sql injection",
-        "privilege escalation",
-        "remote code execution",
-        "reverse shell",
-        "credential dumping",
-    ],
-    "high": [
-        "unauthorized",
-        "forbidden",
-        "brute force",
-        "multiple failed login",
-        "account locked",
-        "suspicious",
-        "powershell",
-        "port scan",
-        "xss",
-        "denied",
-        "persistence",
-        "lateral movement",
-    ],
-    "medium": [
-        "error",
-        "timeout",
-        "failed",
-        "exception",
-        "retry",
-        "unusual",
-        "warning",
-        "spike",
-        "blocked",
-        "anomaly",
-    ],
-}
-
-SAMPLE_LOGS = [
-    {
-        "id": "sample-1",
-        "ip": "185.220.101.14",
-        "message": "Multiple failed login attempts detected for admin account from remote host.",
-        "timestamp": "2026-04-05T07:15:00Z",
-        "source": "vpn-gateway",
-        "level": "warning",
-    },
-    {
-        "id": "sample-2",
-        "ip": "10.0.14.22",
-        "message": "User payroll-service generated repeated database timeout errors during report export.",
-        "timestamp": "2026-04-05T07:18:00Z",
-        "source": "finance-api",
-        "level": "error",
-    },
-    {
-        "id": "sample-3",
-        "ip": "172.16.0.8",
-        "message": "PowerShell encoded command execution blocked by endpoint policy.",
-        "timestamp": "2026-04-05T07:22:00Z",
-        "source": "edr-agent",
-        "level": "critical",
-    },
-    {
-        "id": "sample-4",
-        "ip": "41.89.64.10",
-        "message": "Firewall detected port scan against exposed SSH service.",
-        "timestamp": "2026-04-05T07:25:00Z",
-        "source": "firewall",
-        "level": "warning",
-    },
-    {
-        "id": "sample-5",
-        "ip": "10.0.14.22",
-        "message": "Application health check recovered after temporary upstream timeout.",
-        "timestamp": "2026-04-05T07:31:00Z",
-        "source": "finance-api",
-        "level": "info",
-    },
-    {
-        "id": "sample-6",
-        "ip": "196.201.214.55",
-        "message": "WAF flagged possible SQL injection payload on /login endpoint.",
-        "timestamp": "2026-04-05T07:34:00Z",
-        "source": "waf",
-        "level": "critical",
-    },
-]
 
 
 def load_env_file() -> None:
     env_path = BASE_DIR / ".env"
     if not env_path.exists():
         return
-
     for line in env_path.read_text(encoding="utf-8").splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#") or "=" not in stripped:
@@ -145,64 +73,145 @@ def now_iso() -> str:
 
 
 def normalize_timestamp(value: Any) -> str:
-    if not value:
-        return now_iso()
-
-    if isinstance(value, str):
-        return value
-
+    if isinstance(value, str) and value.strip():
+        return value.strip()
     if isinstance(value, (int, float)):
         try:
-            return datetime.fromtimestamp(value, tz=timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            dt = datetime.fromtimestamp(value, tz=timezone.utc)
+            return dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
         except (OverflowError, OSError, ValueError):
             return now_iso()
-
     if isinstance(value, datetime):
-        if value.tzinfo is None:
-            value = value.replace(tzinfo=timezone.utc)
-        return value.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        dt = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return now_iso()
 
-    return str(value)
+
+def normalize_es_url(url: str) -> str:
+    cleaned = url.strip()
+    if cleaned and "://" not in cleaned:
+        return f"http://{cleaned}"
+    return cleaned
+
+
+def candidate_es_urls(url: str) -> list[str]:
+    cleaned = url.strip()
+    if not cleaned:
+        return [""]
+    if "://" in cleaned:
+        return [cleaned]
+    return [f"https://{cleaned}", f"http://{cleaned}"]
+
+
+def current_source_label() -> str:
+    if STATE["source"] == "elasticsearch":
+        return STATE["es"]["index"]
+    if STATE["source"] == "upload":
+        return STATE["uploaded_label"]
+    return "No data source selected"
+
+
+def summarize_openai_error(exc: Exception) -> str:
+    lowered = str(exc).lower()
+    if "insufficient_quota" in lowered or "429" in lowered:
+        return "OpenAI quota is unavailable right now."
+    if "invalid_api_key" in lowered or "incorrect_api_key" in lowered or "api key" in lowered:
+        return "OpenAI API key is invalid or missing."
+    if "rate limit" in lowered:
+        return "OpenAI is rate-limiting requests right now. Try again shortly."
+    if "timeout" in lowered:
+        return "OpenAI timed out."
+    return "OpenAI is unavailable right now."
+
+
+def format_es_error(exc: Exception, index_pattern: str, username: str = "") -> str:
+    lowered = str(exc).lower()
+    if index_pattern.startswith(".security"):
+        return (
+            f"The index pattern {index_pattern} points to Elasticsearch's internal security index. "
+            "Use your real log index instead."
+        )
+    if isinstance(exc, SSLError) or any(token in lowered for token in ("ssl", "tls", "handshake", "certificate_unknown")):
+        return "Elasticsearch SSL/TLS handshake failed. Use the correct https:// URL and certificate settings."
+    if isinstance(exc, AuthenticationException):
+        user_text = f" for user {username}" if username else ""
+        return f"Elasticsearch authentication failed{user_text}. Check the username and password."
+    if isinstance(exc, AuthorizationException):
+        return "Elasticsearch rejected this account for the requested action."
+    if isinstance(exc, NotFoundError) or "no such index" in lowered:
+        return f"Elasticsearch index pattern {index_pattern} does not exist."
+    if isinstance(exc, BadRequestError):
+        return f"Elasticsearch rejected the index pattern {index_pattern}. Check the name or wildcard."
+    if isinstance(exc, ConnectionError):
+        return "Could not reach Elasticsearch. Check the URL, port, and whether the cluster is running."
+    return f"Elasticsearch connection failed: {exc}"
+
+
+def es_client(config: dict[str, Any] | None = None) -> Elasticsearch:
+    cfg = config or STATE["es"]
+    options: dict[str, Any] = {
+        "hosts": [cfg["url"]],
+        "request_timeout": 20,
+        "verify_certs": False,
+        "ssl_show_warn": False,
+    }
+    if cfg.get("username"):
+        options["basic_auth"] = (cfg["username"], cfg.get("password", ""))
+    return Elasticsearch(**options)
+
+
+def validate_es(config: dict[str, Any]) -> dict[str, Any]:
+    client = es_client(config)
+    client.info()
+    response = client.search(index=config["index"], size=1, query={"match_all": {}})
+    hits = response.get("hits", {}) if isinstance(response, dict) else {}
+    total = hits.get("total", 0)
+    if isinstance(total, dict):
+        document_count = int(total.get("value", 0))
+    elif isinstance(total, int):
+        document_count = total
+    else:
+        document_count = len(hits.get("hits", []) or [])
+    return {"targets": [config["index"]], "document_count": document_count}
 
 
 def extract_message(source: dict[str, Any]) -> str:
     nested_event = source.get("event") if isinstance(source.get("event"), dict) else {}
-    for key in ("message", "log", "summary"):
-        value = source.get(key)
+    nested_log = source.get("log") if isinstance(source.get("log"), dict) else {}
+    for value in (
+        source.get("message"),
+        nested_log.get("message"),
+        source.get("summary"),
+        nested_event.get("original"),
+    ):
         if isinstance(value, str) and value.strip():
             return value.strip()
-
-    event_original = nested_event.get("original")
-    if isinstance(event_original, str) and event_original.strip():
-        return event_original.strip()
-
     return json.dumps(source, default=str)
 
 
-def extract_ip(source: dict[str, Any], message: str = "") -> str:
-    ip_paths = [
+def extract_ip(source: dict[str, Any], message: str) -> str:
+    candidates = [
         source.get("ip"),
+        source.get("src_ip"),
         source.get("source", {}).get("ip") if isinstance(source.get("source"), dict) else None,
         source.get("client", {}).get("ip") if isinstance(source.get("client"), dict) else None,
         source.get("host", {}).get("ip") if isinstance(source.get("host"), dict) else None,
-        source.get("src_ip"),
     ]
-    for value in ip_paths:
+    for value in candidates:
         if isinstance(value, str) and value.strip():
             return value.strip()
-
     match = IP_PATTERN.search(message)
     return match.group(0) if match else "unknown"
 
 
 def extract_source_name(source: dict[str, Any]) -> str:
     candidates = [
-        source.get("service", {}).get("name") if isinstance(source.get("service"), dict) else None,
-        source.get("host", {}).get("name") if isinstance(source.get("host"), dict) else None,
-        source.get("agent", {}).get("name") if isinstance(source.get("agent"), dict) else None,
         source.get("source"),
         source.get("component"),
         source.get("app"),
+        source.get("event", {}).get("dataset") if isinstance(source.get("event"), dict) else None,
+        source.get("service", {}).get("name") if isinstance(source.get("service"), dict) else None,
+        source.get("host", {}).get("name") if isinstance(source.get("host"), dict) else None,
     ]
     for value in candidates:
         if isinstance(value, str) and value.strip():
@@ -210,36 +219,21 @@ def extract_source_name(source: dict[str, Any]) -> str:
     return "unknown"
 
 
-def severity_rank(level: str) -> int:
-    order = {"critical": 4, "high": 3, "warning": 2, "medium": 2, "info": 1, "low": 1}
-    return order.get(level.lower(), 0)
-
-
-def classify_message(message: str, level: str = "") -> tuple[str, list[str], int]:
+def classify_log(message: str, level: str) -> tuple[str, list[str], int]:
     lowered = message.lower()
     reasons: list[str] = []
     score = 0
-    classification = "info"
 
-    if level:
-        if level.lower() in {"critical", "error"}:
-            score += 2
-        elif level.lower() == "warning":
-            score += 1
-
-    for severity, keywords in KEYWORD_RULES.items():
-        for keyword in keywords:
-            if keyword in lowered:
-                reasons.append(keyword)
-                score += {"critical": 4, "high": 3, "medium": 2}[severity]
-
-    if "failed login" in lowered and ("multiple" in lowered or "repeated" in lowered):
-        reasons.append("repeated failed authentication")
-        score += 3
-
-    if "blocked" in lowered and "powershell" in lowered:
-        reasons.append("script execution attempt")
+    if level in {"critical", "error"}:
         score += 2
+    elif level == "warning":
+        score += 1
+
+    for severity, words in KEYWORDS.items():
+        for word in words:
+            if word in lowered:
+                reasons.append(word)
+                score += {"critical": 4, "high": 3, "warning": 2}[severity]
 
     if score >= 6:
         classification = "critical"
@@ -247,80 +241,59 @@ def classify_message(message: str, level: str = "") -> tuple[str, list[str], int
         classification = "high"
     elif score >= 2:
         classification = "warning"
-
+    else:
+        classification = "info"
     return classification, sorted(set(reasons)), score
 
 
-def normalize_log(entry: dict[str, Any], index: int = 0) -> dict[str, Any]:
+def normalize_log(entry: dict[str, Any], index: int) -> dict[str, Any]:
     message = extract_message(entry)
-    event_data = entry.get("event") if isinstance(entry.get("event"), dict) else {}
     nested_log = entry.get("log") if isinstance(entry.get("log"), dict) else {}
+    event = entry.get("event") if isinstance(entry.get("event"), dict) else {}
     raw_level = str(entry.get("level") or nested_log.get("level") or "info").lower()
-    classification, reasons, score = classify_message(message, raw_level)
-    timestamp = normalize_timestamp(entry.get("timestamp") or entry.get("@timestamp") or event_data.get("created"))
-    ip = extract_ip(entry, message)
-    source_name = extract_source_name(entry)
-    level = raw_level if raw_level and raw_level != "info" else classification
-
+    classification, reasons, score = classify_log(message, raw_level)
     return {
         "id": str(entry.get("id") or entry.get("_id") or f"log-{index}"),
-        "ip": ip,
+        "timestamp": normalize_timestamp(entry.get("@timestamp") or entry.get("timestamp") or event.get("created")),
+        "source": extract_source_name(entry),
+        "ip": extract_ip(entry, message),
         "message": message,
-        "timestamp": timestamp,
-        "source": source_name,
-        "level": level,
+        "level": raw_level,
         "classification": classification,
         "score": score,
         "reasons": reasons,
-        "raw": entry,
     }
 
 
-def get_es_client() -> Elasticsearch | None:
-    cfg = APP_STATE["es_config"]
-    if not cfg.get("url"):
-        return None
-
-    options: dict[str, Any] = {"hosts": [cfg["url"]], "request_timeout": 15}
-    if cfg.get("username"):
-        options["basic_auth"] = (cfg["username"], cfg.get("password", ""))
-    return Elasticsearch(**options)
-
-
-def make_text_log(line: str, index: int, source_name: str) -> dict[str, Any]:
-    timestamp_match = ISO_TIMESTAMP_PATTERN.search(line)
-    ip_match = IP_PATTERN.search(line)
-    payload = {
-        "id": f"text-{index}",
-        "timestamp": timestamp_match.group(0) if timestamp_match else now_iso(),
-        "ip": ip_match.group(0) if ip_match else "unknown",
-        "message": line.strip(),
-        "source": source_name,
-        "level": "info",
-    }
-    return normalize_log(payload, index)
+def parse_text_lines(text: str, source_name: str) -> list[dict[str, Any]]:
+    logs = []
+    for index, line in enumerate((line.strip() for line in text.splitlines() if line.strip()), 1):
+        timestamp = TIME_PATTERN.search(line)
+        payload = {
+            "id": f"text-{index}",
+            "timestamp": timestamp.group(0) if timestamp else now_iso(),
+            "source": source_name,
+            "message": line,
+        }
+        logs.append(normalize_log(payload, index))
+    return logs
 
 
-def parse_text_blob(text: str, source_name: str = "manual-input") -> list[dict[str, Any]]:
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    return [make_text_log(line, index, source_name) for index, line in enumerate(lines, 1)]
-
-
-def parse_json_payload(text: str, source_name: str) -> list[dict[str, Any]]:
+def parse_json_text(text: str, source_name: str) -> list[dict[str, Any]]:
     parsed = json.loads(text)
     if isinstance(parsed, dict):
-        if isinstance(parsed.get("logs"), list):
-            items = parsed["logs"]
-        else:
-            items = [parsed]
+        items = parsed.get("logs") if isinstance(parsed.get("logs"), list) else [parsed]
     elif isinstance(parsed, list):
         items = parsed
     else:
-        return []
-    return [normalize_log(item if isinstance(item, dict) else {"message": str(item), "source": source_name}, idx) for idx, item in enumerate(items, 1)]
+        items = [parsed]
+    return [
+        normalize_log(item if isinstance(item, dict) else {"message": str(item), "source": source_name}, index)
+        for index, item in enumerate(items, 1)
+    ]
 
 
-def parse_jsonl_payload(text: str, source_name: str) -> list[dict[str, Any]]:
+def parse_jsonl_text(text: str, source_name: str) -> list[dict[str, Any]]:
     logs: list[dict[str, Any]] = []
     for index, line in enumerate(text.splitlines(), 1):
         stripped = line.strip()
@@ -328,74 +301,64 @@ def parse_jsonl_payload(text: str, source_name: str) -> list[dict[str, Any]]:
             continue
         try:
             parsed = json.loads(stripped)
+            entry = parsed if isinstance(parsed, dict) else {"message": str(parsed), "source": source_name}
+            logs.append(normalize_log(entry, index))
         except json.JSONDecodeError:
-            logs.append(make_text_log(stripped, index, source_name))
-            continue
-        entry = parsed if isinstance(parsed, dict) else {"message": str(parsed), "source": source_name}
-        logs.append(normalize_log(entry, index))
+            logs.extend(parse_text_lines(stripped, source_name))
     return logs
 
 
-def parse_csv_payload(text: str, source_name: str) -> list[dict[str, Any]]:
+def parse_csv_text(text: str, source_name: str) -> list[dict[str, Any]]:
     reader = csv.DictReader(io.StringIO(text))
-    logs: list[dict[str, Any]] = []
+    logs = []
     for index, row in enumerate(reader, 1):
-        payload = {key: value for key, value in row.items() if value not in (None, "")}
-        if "source" not in payload:
-            payload["source"] = source_name
+        payload = {key: value for key, value in row.items() if value not in ("", None)}
+        payload.setdefault("source", source_name)
         logs.append(normalize_log(payload, index))
     return logs
 
 
-def parse_uploaded_content(filename: str, content: str) -> list[dict[str, Any]]:
+def parse_uploaded_content(filename: str, text: str) -> list[dict[str, Any]]:
     suffix = Path(filename).suffix.lower()
-    source_name = Path(filename).stem or "uploaded-file"
-
+    source_name = Path(filename).stem or "uploaded"
     if suffix == ".csv":
-        logs = parse_csv_payload(content, source_name)
-    elif suffix in {".json"}:
-        logs = parse_json_payload(content, source_name)
-    elif suffix in {".jsonl", ".ndjson"}:
-        logs = parse_jsonl_payload(content, source_name)
-    else:
-        try:
-            logs = parse_json_payload(content, source_name)
-        except json.JSONDecodeError:
-            logs = parse_text_blob(content, source_name)
-
-    return logs
+        return parse_csv_text(text, source_name)
+    if suffix == ".json":
+        return parse_json_text(text, source_name)
+    if suffix in {".jsonl", ".ndjson"}:
+        return parse_jsonl_text(text, source_name)
+    try:
+        return parse_json_text(text, source_name)
+    except json.JSONDecodeError:
+        return parse_text_lines(text, source_name)
 
 
-def set_custom_logs(logs: list[dict[str, Any]], label: str) -> None:
-    APP_STATE["custom_logs"] = logs
-    APP_STATE["custom_label"] = label
-    APP_STATE["active_source"] = "custom" if logs else "sample"
+def filter_logs(logs: list[dict[str, Any]], query_text: str, limit: int) -> list[dict[str, Any]]:
+    query = query_text.strip().lower()
+    if query:
+        logs = [log for log in logs if query in json.dumps(log, default=str).lower()]
+    logs = sorted(logs, key=lambda item: item["timestamp"], reverse=True)
+    return logs[: min(max(limit, 1), MAX_LIMIT)]
 
 
-def fetch_logs_from_elasticsearch(limit: int = 50, query_text: str = "") -> list[dict[str, Any]]:
-    client = get_es_client()
-    if client is None:
-        return []
-
-    cfg = APP_STATE["es_config"]
-    if query_text:
-        es_query: dict[str, Any] = {
-            "bool": {
-                "should": [
-                    {"query_string": {"query": query_text}},
-                    {"match": {"message": query_text}},
-                ],
-                "minimum_should_match": 1,
+def fetch_es_logs(limit: int, query_text: str) -> list[dict[str, Any]]:
+    query: dict[str, Any]
+    if query_text.strip():
+        query = {
+            "simple_query_string": {
+                "query": query_text,
+                "fields": ["message^3", "event.original^2", "host.name", "service.name", "source", "*"],
+                "lenient": True,
             }
         }
     else:
-        es_query = {"match_all": {}}
+        query = {"match_all": {}}
 
-    response = client.search(
-        index=cfg.get("index") or "logs-*",
-        size=min(max(limit, 1), 200),
+    response = es_client().search(
+        index=STATE["es"]["index"],
+        size=min(max(limit, 1), MAX_LIMIT),
         sort=[{"@timestamp": {"order": "desc", "unmapped_type": "date"}}],
-        query=es_query,
+        query=query,
     )
     hits = response.get("hits", {}).get("hits", [])
     logs = []
@@ -406,156 +369,86 @@ def fetch_logs_from_elasticsearch(limit: int = 50, query_text: str = "") -> list
     return logs
 
 
-def apply_query(logs: list[dict[str, Any]], query_text: str, limit: int) -> list[dict[str, Any]]:
-    query = query_text.strip().lower()
-    if query:
-        logs = [
-            log for log in logs
-            if query in json.dumps(log, default=str).lower()
-        ]
-    logs = sorted(logs, key=lambda item: item["timestamp"], reverse=True)
-    return logs[: min(max(limit, 1), 200)]
+def current_logs(limit: int = DEFAULT_LIMIT, query_text: str = "") -> tuple[list[dict[str, Any]], str, str | None, str]:
+    if STATE["source"] == "upload" and STATE["uploaded_logs"]:
+        return filter_logs(STATE["uploaded_logs"], query_text, limit), "upload", None, STATE["uploaded_label"]
 
-
-def get_logs(limit: int = 50, query_text: str = "") -> tuple[list[dict[str, Any]], str, str | None, str]:
-    active_source = APP_STATE.get("active_source", "sample")
-
-    if active_source == "custom" and APP_STATE["custom_logs"]:
-        logs = apply_query(APP_STATE["custom_logs"], query_text, limit)
-        return logs, "custom", None, APP_STATE["custom_label"]
-
-    if active_source == "elasticsearch":
+    if STATE["source"] == "elasticsearch":
+        if not STATE["es"]["connected"]:
+            return [], "elasticsearch", STATE["es"]["error"] or "Elasticsearch is not connected.", STATE["es"]["index"]
         try:
-            logs = fetch_logs_from_elasticsearch(limit=limit, query_text=query_text)
-            return logs, "elasticsearch", None, APP_STATE["es_config"].get("index", "logs-*")
+            return fetch_es_logs(limit, query_text), "elasticsearch", None, STATE["es"]["index"]
         except Exception as exc:
-            fallback = [normalize_log(log, idx) for idx, log in enumerate(SAMPLE_LOGS, 1)]
-            return fallback[:limit], "sample", str(exc), "Built-in sample logs"
+            message = format_es_error(exc, STATE["es"]["index"], STATE["es"]["username"])
+            STATE["es"]["connected"] = False
+            STATE["es"]["error"] = message
+            return [], "elasticsearch", message, STATE["es"]["index"]
 
-    logs = apply_query([normalize_log(log, idx) for idx, log in enumerate(SAMPLE_LOGS, 1)], query_text, limit)
-    return logs, "sample", None, "Built-in sample logs"
-
-
-def extract_keywords(logs: list[dict[str, Any]]) -> dict[str, int]:
-    counts: Counter[str] = Counter()
-    for log in logs:
-        for reason in log["reasons"]:
-            counts[reason] += 1
-    return dict(counts.most_common(8))
-
-
-def build_timeline(logs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    buckets: Counter[str] = Counter()
-    for log in logs:
-        stamp = log["timestamp"]
-        bucket = stamp[:13] + ":00Z" if "T" in stamp and len(stamp) >= 13 else stamp
-        buckets[bucket] += 1
-    return [{"time": key, "count": value} for key, value in sorted(buckets.items())]
-
-
-def build_recommendations(logs: list[dict[str, Any]], stats: dict[str, Any]) -> list[str]:
-    recommendations: list[str] = []
-    top_keywords = list(stats["keyword_count"].keys())
-
-    if stats["critical_count"]:
-        recommendations.append("Prioritize the critical alerts first and pivot on the affected IPs and hosts.")
-    if "sql injection" in top_keywords:
-        recommendations.append("Review the targeted web endpoints and inspect WAF, reverse proxy, and application traces together.")
-    if "repeated failed authentication" in top_keywords or "multiple failed login" in top_keywords:
-        recommendations.append("Check for brute-force activity, correlate usernames, and confirm whether MFA or account lockout was triggered.")
-    if any(log["source"] == "unknown" for log in logs):
-        recommendations.append("Normalize missing source fields so future searches and dashboards remain reliable.")
-    if not recommendations:
-        recommendations.append("Use the search bar and assistant prompt to pivot on the most active IPs, sources, and warning patterns.")
-
-    return recommendations[:4]
+    return [], "none", "Connect to Elasticsearch or upload logs to begin.", "No data source selected"
 
 
 def build_stats(logs: list[dict[str, Any]]) -> dict[str, Any]:
-    by_ip = Counter(log["ip"] for log in logs)
-    by_level = Counter(log["classification"] for log in logs)
-    by_source = Counter(log["source"] for log in logs)
+    by_class = Counter(log["classification"] for log in logs)
+    by_ip = Counter(log["ip"] for log in logs if log["ip"] != "unknown")
+    top_sources = Counter(log["source"] for log in logs if log["source"] != "unknown")
     alerts = sorted(
-        (log for log in logs if severity_rank(log["classification"]) >= severity_rank("warning")),
+        [log for log in logs if log["classification"] in {"critical", "high", "warning"}],
         key=lambda item: (item["score"], item["timestamp"]),
         reverse=True,
-    )[:8]
-    keyword_count = extract_keywords(logs)
-    stats = {
+    )[:6]
+    return {
         "total_logs": len(logs),
+        "critical_count": by_class.get("critical", 0),
+        "high_count": by_class.get("high", 0),
+        "warning_count": by_class.get("warning", 0),
         "alerts_count": len(alerts),
-        "critical_count": by_level.get("critical", 0),
-        "high_count": by_level.get("high", 0),
-        "warning_count": by_level.get("warning", 0),
-        "ip_count": dict(by_ip.most_common(8)),
-        "source_count": dict(by_source.most_common(6)),
-        "level_count": dict(by_level),
-        "keyword_count": keyword_count,
-        "timeline": build_timeline(logs),
         "alerts": alerts,
-        "recommendations": [],
+        "top_ips": dict(by_ip.most_common(5)),
+        "top_sources": dict(top_sources.most_common(5)),
     }
-    stats["recommendations"] = build_recommendations(logs, stats)
-    return stats
 
 
-def build_local_analysis(query: str, selected_log: dict[str, Any] | None, stats: dict[str, Any], active_label: str) -> str:
-    if selected_log:
-        reasons = ", ".join(selected_log["reasons"]) if selected_log["reasons"] else "no strong threat indicators were matched"
-        return (
-            f"Data source: {active_label}. Selected event risk is {selected_log['classification']} from "
-            f"{selected_log['source']} at {selected_log['timestamp']}. Indicators: {reasons}. "
-            f"Top IPs in the current view are {', '.join(list(stats['ip_count'].keys())[:3]) or 'not available'}. "
-            f"Prompt: {query or 'general analysis request'}. "
-            f"Immediate actions: {stats['recommendations'][0]}"
-        )
-
-    return (
-        f"Data source: {active_label}. Current log set contains {stats['total_logs']} events with "
-        f"{stats['alerts_count']} notable alerts, {stats['critical_count']} critical findings, and "
-        f"{stats['high_count']} high-risk findings. Prompt: {query or 'general summary request'}. "
-        f"Most common indicators are {', '.join(list(stats['keyword_count'].keys())[:4]) or 'not enough data yet'}. "
-        f"Immediate actions: {stats['recommendations'][0]}"
-    )
-
-
-def build_openai_analysis(query: str, selected_log: dict[str, Any] | None, stats: dict[str, Any], active_label: str) -> str:
+def build_openai_analysis(query: str, logs: list[dict[str, Any]], selected_log: dict[str, Any] | None, source_label: str) -> dict[str, Any]:
     api_key = os.environ.get("OPENAI_API_KEY", "").strip()
     if not api_key:
-        return ""
-
-    client = OpenAI(api_key=api_key)
-    prompt = {
-        "data_source": active_label,
-        "user_question": query,
+        raise RuntimeError("Missing OPENAI_API_KEY.")
+    payload = {
+        "source": source_label,
+        "query": query or "Summarize the current dataset.",
         "selected_log": selected_log,
-        "stats": {
-            "total_logs": stats["total_logs"],
-            "alerts_count": stats["alerts_count"],
-            "critical_count": stats["critical_count"],
-            "high_count": stats["high_count"],
-            "top_ips": stats["ip_count"],
-            "top_sources": stats["source_count"],
-            "top_keywords": stats["keyword_count"],
-            "recommendations": stats["recommendations"],
-        },
+        "stats": build_stats(logs),
+        "logs": [
+            {
+                "timestamp": log["timestamp"],
+                "source": log["source"],
+                "ip": log["ip"],
+                "classification": log["classification"],
+                "message": log["message"],
+            }
+            for log in logs[:20]
+        ],
     }
-
+    client = OpenAI(api_key=api_key, timeout=60.0)
     response = client.responses.create(
-        model="gpt-4o-mini",
+        model=OPENAI_MODEL,
         input=[
             {
                 "role": "system",
                 "content": (
-                    "You are a SOC analyst. Explain logs clearly, mention risk level, likely meaning, "
-                    "and 3 practical next steps. Keep it concise."
+                    "You are a professional SOC analyst. Answer directly, summarize risk clearly, "
+                    "and give practical next steps based only on the provided log data. "
+                    "Format the answer as clean Markdown with short section headings, concise numbered or bulleted lists, "
+                    "and no tables or code fences."
                 ),
             },
-            {"role": "user", "content": json.dumps(prompt, ensure_ascii=True)},
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=True)},
         ],
         temperature=0.2,
     )
-    return getattr(response, "output_text", "").strip()
+    text = getattr(response, "output_text", "").strip()
+    if not text:
+        raise RuntimeError("OpenAI returned an empty response.")
+    return {"text": text, "model": OPENAI_MODEL}
 
 
 @app.get("/")
@@ -565,17 +458,16 @@ def home() -> Any:
 
 @app.get("/health")
 def health() -> Any:
-    logs, source, error, label = get_logs(limit=20)
+    logs, source, error, label = current_logs(limit=20)
     return jsonify(
         {
             "status": "ok",
-            "data_source": source,
+            "source": source,
             "source_label": label,
-            "elasticsearch_configured": bool(APP_STATE["es_config"].get("url")),
-            "custom_logs_loaded": bool(APP_STATE["custom_logs"]),
             "log_count": len(logs),
             "error": error,
-            "platform_hint": "Runs on Linux and Kali Linux with Python 3 and pip-installed dependencies.",
+            "elasticsearch_connected": STATE["es"]["connected"],
+            "uploaded_loaded": bool(STATE["uploaded_logs"]),
         }
     )
 
@@ -583,44 +475,81 @@ def health() -> Any:
 @app.post("/connect-elasticsearch")
 def connect_elasticsearch() -> Any:
     payload = request.get_json(silent=True) or {}
-    config = {
-        "url": str(payload.get("url", "")).strip(),
-        "username": str(payload.get("username", "")).strip(),
-        "password": str(payload.get("password", "")).strip(),
-        "index": str(payload.get("index", "logs-*")).strip() or "logs-*",
+    raw_url = str(payload.get("url", "")).strip()
+    username = str(payload.get("username", "")).strip()
+    password = str(payload.get("password", "")).strip()
+    index_pattern = str(payload.get("index", "logs-*")).strip() or "logs-*"
+
+    if not raw_url:
+        STATE["es"] = {
+            "url": "",
+            "username": username,
+            "password": password,
+            "index": index_pattern,
+            "connected": False,
+            "error": "Elasticsearch URL cleared.",
+        }
+        STATE["source"] = "upload" if STATE["uploaded_logs"] else "none"
+        return jsonify({"connected": False, "message": "Elasticsearch URL cleared."})
+
+    best_error = "Elasticsearch connection failed."
+    best_details = ""
+    attempted_config = None
+
+    for candidate_url in candidate_es_urls(raw_url):
+        config = {
+            "url": normalize_es_url(candidate_url),
+            "username": username,
+            "password": password,
+            "index": index_pattern,
+            "connected": False,
+            "error": "",
+        }
+        attempted_config = config
+        try:
+            validation = validate_es(config)
+            config["connected"] = True
+            STATE["es"] = config
+            STATE["source"] = "elasticsearch"
+            target_count = len(validation["targets"])
+            target_label = "target" if target_count == 1 else "targets"
+            return jsonify(
+                {
+                    "connected": True,
+                    "message": (
+                        f"Connected to Elasticsearch. Index pattern {index_pattern} matched "
+                        f"{target_count} {target_label} and {validation['document_count']} documents."
+                    ),
+                    "config": {"url": config["url"], "index": index_pattern, "username": username},
+                    "targets": validation["targets"],
+                    "document_count": validation["document_count"],
+                }
+            )
+        except Exception as exc:
+            best_error = format_es_error(exc, index_pattern, username)
+            best_details = str(exc)
+            if isinstance(exc, (AuthenticationException, AuthorizationException, NotFoundError, BadRequestError, SSLError)):
+                break
+
+    STATE["es"] = attempted_config or {
+        "url": normalize_es_url(raw_url),
+        "username": username,
+        "password": password,
+        "index": index_pattern,
+        "connected": False,
+        "error": best_error,
     }
-    APP_STATE["es_config"] = config
-
-    if not config["url"]:
-        APP_STATE["active_source"] = "sample"
-        return jsonify({"connected": False, "message": "Elasticsearch URL cleared. Using built-in sample logs."})
-
-    try:
-        client = get_es_client()
-        assert client is not None
-        client.info()
-        APP_STATE["active_source"] = "elasticsearch"
-        return jsonify({"connected": True, "message": f"Connected to Elasticsearch index pattern {config['index']}."})
-    except Exception as exc:
-        APP_STATE["active_source"] = "sample"
-        return jsonify({"connected": False, "message": f"Elasticsearch connection failed. Falling back to sample logs. Details: {exc}"})
-
-
-@app.post("/set-source")
-def set_source() -> Any:
-    payload = request.get_json(silent=True) or {}
-    requested = str(payload.get("source", "sample")).strip().lower()
-
-    if requested == "custom" and APP_STATE["custom_logs"]:
-        APP_STATE["active_source"] = "custom"
-        return jsonify({"ok": True, "message": f"Switched to {APP_STATE['custom_label']}."})
-
-    if requested == "elasticsearch" and APP_STATE["es_config"].get("url"):
-        APP_STATE["active_source"] = "elasticsearch"
-        return jsonify({"ok": True, "message": "Switched to Elasticsearch data."})
-
-    APP_STATE["active_source"] = "sample"
-    return jsonify({"ok": True, "message": "Switched to built-in sample logs."})
+    STATE["es"]["connected"] = False
+    STATE["es"]["error"] = best_error
+    STATE["source"] = "upload" if STATE["uploaded_logs"] else "none"
+    return jsonify(
+        {
+            "connected": False,
+            "message": best_error,
+            "details": best_details,
+            "config": {"url": STATE["es"]["url"], "index": index_pattern, "username": username},
+        }
+    )
 
 
 @app.post("/upload-logs")
@@ -629,46 +558,28 @@ def upload_logs() -> Any:
     if uploaded is None or not uploaded.filename:
         return jsonify({"ok": False, "message": "Choose a log file first."}), 400
 
-    content = uploaded.read().decode("utf-8", errors="ignore")
-    logs = parse_uploaded_content(uploaded.filename, content)
+    text = uploaded.read().decode("utf-8", errors="ignore")
+    logs = parse_uploaded_content(uploaded.filename, text)
     if not logs:
         return jsonify({"ok": False, "message": "No log entries could be extracted from that file."}), 400
 
-    set_custom_logs(logs, f"Uploaded file: {uploaded.filename}")
+    STATE["uploaded_logs"] = logs
+    STATE["uploaded_label"] = f"Uploaded file: {uploaded.filename}"
+    STATE["source"] = "upload"
     return jsonify({"ok": True, "message": f"Loaded {len(logs)} log entries from {uploaded.filename}.", "count": len(logs)})
-
-
-@app.post("/ingest-text")
-def ingest_text() -> Any:
-    payload = request.get_json(silent=True) or {}
-    text = str(payload.get("text", "")).strip()
-    source_name = str(payload.get("source_name", "manual-input")).strip() or "manual-input"
-    if not text:
-        return jsonify({"ok": False, "message": "Paste log text or other content first."}), 400
-
-    try:
-        logs = parse_json_payload(text, source_name)
-    except json.JSONDecodeError:
-        logs = parse_text_blob(text, source_name)
-
-    if not logs:
-        return jsonify({"ok": False, "message": "No logs could be parsed from the supplied text."}), 400
-
-    set_custom_logs(logs, f"Manual input: {source_name}")
-    return jsonify({"ok": True, "message": f"Loaded {len(logs)} entries from pasted text.", "count": len(logs)})
 
 
 @app.get("/get-logs")
 def api_get_logs() -> Any:
-    limit = request.args.get("limit", default=50, type=int)
+    limit = request.args.get("limit", default=DEFAULT_LIMIT, type=int)
     query_text = request.args.get("q", default="", type=str)
-    logs, source, error, label = get_logs(limit=limit, query_text=query_text)
+    logs, source, error, label = current_logs(limit=limit, query_text=query_text)
     return jsonify({"logs": logs, "source": source, "source_label": label, "error": error})
 
 
 @app.get("/stats")
 def api_stats() -> Any:
-    logs, source, error, label = get_logs(limit=200)
+    logs, source, error, label = current_logs(limit=MAX_LIMIT)
     stats = build_stats(logs)
     stats["source"] = source
     stats["source_label"] = label
@@ -678,80 +589,49 @@ def api_stats() -> Any:
 
 @app.post("/chat")
 def api_chat() -> Any:
-    payload = request.get_json(silent=True)
-    if payload is None:
-        payload = request.form.to_dict()
-
+    payload = request.get_json(silent=True) or {}
     query = str(payload.get("query", "")).strip()
-    selected_log_payload = payload.get("log")
-    selected_log: dict[str, Any] | None = None
-    if isinstance(selected_log_payload, str) and selected_log_payload.strip():
-        try:
-            selected_log = json.loads(selected_log_payload)
-        except json.JSONDecodeError:
-            selected_log = {
-                "message": selected_log_payload,
-                "source": "unknown",
-                "timestamp": now_iso(),
-                "classification": "info",
-                "reasons": [],
+    selected_log = payload.get("log") if isinstance(payload.get("log"), dict) else None
+    logs, source, error, label = current_logs(limit=MAX_LIMIT)
+
+    if not logs:
+        return jsonify(
+            {
+                "response": "",
+                "source": source,
+                "source_label": label,
+                "error": error,
+                "ai_used": False,
+                "ai_error": "No logs are available to analyze.",
+                "model": None,
             }
-    elif isinstance(selected_log_payload, dict):
-        selected_log = selected_log_payload
+        )
 
-    logs, source, error, label = get_logs(limit=200)
-    stats = build_stats(logs)
     try:
-        response_text = build_openai_analysis(query=query, selected_log=selected_log, stats=stats, active_label=label)
-    except Exception:
-        response_text = ""
-
-    if not response_text:
-        response_text = build_local_analysis(query=query, selected_log=selected_log, stats=stats, active_label=label)
-
-    return jsonify({"response": response_text, "source": source, "source_label": label, "error": error})
-
-
-@app.get("/report")
-def report() -> Any:
-    logs, source, error, label = get_logs(limit=200)
-    stats = build_stats(logs)
-    summary = build_local_analysis(query="Generate a concise incident report.", selected_log=None, stats=stats, active_label=label)
-    return jsonify(
-        {
-            "source": source,
-            "source_label": label,
-            "summary": summary,
-            "recommendations": stats["recommendations"],
-            "top_indicators": stats["keyword_count"],
-            "error": error,
-        }
-    )
-
-
-@app.get("/architecture")
-def architecture() -> Any:
-    return jsonify(
-        {
-            "title": "Automated Log Analysis Using OpenAI and Elasticsearch",
-            "components": [
-                "Linux-ready Flask backend",
-                "Responsive browser dashboard frontend",
-                "Elasticsearch log retrieval",
-                "File upload ingestion for txt, json, jsonl, ndjson, and csv",
-                "Pasted text ingestion",
-                "Heuristic anomaly detection and summary reporting",
-                "OpenAI-assisted analyst explanations",
-            ],
-            "flow": [
-                "User selects Elasticsearch, uploaded file, pasted text, or sample logs",
-                "Backend normalizes logs into a common structure",
-                "System scores suspicious events and aggregates operational metrics",
-                "Dashboard shows alerts, trends, indicators, and recommended actions",
-                "Analyst enters a prompt to ask about the whole dataset or a selected log",
-            ],
-        }
-    )
+        result = build_openai_analysis(query=query, logs=logs, selected_log=selected_log, source_label=label)
+        return jsonify(
+            {
+                "response": result["text"],
+                "source": source,
+                "source_label": label,
+                "error": error,
+                "ai_used": True,
+                "ai_error": None,
+                "model": result["model"],
+            }
+        )
+    except Exception as exc:
+        return jsonify(
+            {
+                "response": "",
+                "source": source,
+                "source_label": label,
+                "error": error,
+                "ai_used": False,
+                "ai_error": summarize_openai_error(exc),
+                "model": None,
+            }
+        )
 
 
 if __name__ == "__main__":
