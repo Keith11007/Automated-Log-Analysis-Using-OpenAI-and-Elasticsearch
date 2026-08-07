@@ -40,6 +40,7 @@ The system supports:
 - `.jsonl`
 - `.ndjson`
 - `.csv`
+and more.
 
 ## Installation
 
@@ -78,13 +79,14 @@ pip install -r requirements.txt
 
 ### 5. Configure environment variables
 
-Create a `.env` file and add the required API credentials, including:
+Edit your `.env` file and add the required API credentials, including:
 
 ```env
 OPENAI_API_KEY=your_openai_api_key
 ```
-
-Add any other API or Elasticsearch configuration required by your local setup.
+```env
+ABUSEIPDB_API_KEY=ABUSEIPDB_API_KEY=your_abuseipdb_api_key
+```
 
 ### 6. Run the application
 
@@ -100,27 +102,6 @@ Open the dashboard in your browser:
 http://localhost:8000
 ```
 
-## How It Works
-
-The system follows this general workflow:
-
-```text
-Log Source
-    ↓
-Elasticsearch / Log File Upload
-    ↓
-Log Processing
-    ↓
-OpenAI Classification
-    ↓
-Severity Classification
-    ↓
-Dashboard
-    ↓
-OpenAI Security Analysis
-    ↓
-Security Insights & Recommendations
-```
 
 ### Log Classification
 
@@ -175,7 +156,6 @@ Automated-Log-Analysis-Using-OpenAI-and-Elasticsearch/
 │       ├── actions.js
 │       └── ui.js
 │
-├── templates/
 │
 ├── log_processing.py
 ├── settings.py
@@ -195,4 +175,4 @@ The purpose of this project is to reduce the manual effort involved in analyzing
 
 ## Author
 
-**Chilton Keith**
+**Simiyu Chilton Keith**
