@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ATX5 Log Analyzer</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="shell">
+    <!-- Left sidebar: data-source setup and current source details. -->
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="muted">An-Automated Log Analyzer</div>
+        <h1>ATX5 Data Source</h1>
+        <div class="helper">Connect your Elasticsearch data source or upload a log file to investigate events, generate reports, and analyze using OpenAI.</div>
+      </div>
+      <div class="stack">
+        <section class="card">
+          <h3>Elasticsearch</h3>
+          <label for="esUrl">Cluster URL</label><input id="esUrl" placeholder="https://localhost:9200">
+          <label for="esIndex">Index pattern</label><input id="esIndex" value="logs-*">
+          <label for="esUser">Username</label><input id="esUser" placeholder="elastic">
+          <label for="esPassword">Password</label><input id="esPassword" type="password" placeholder="Optional">
+          <div class="button-row"><button id="connectBtn">Connect</button></div>
+        </section>
+        <section class="card">
+          <h3>Upload Logs</h3>
+          <div class="helper">Supported: `.txt`, `.log`, `.json`, `.jsonl`, `.ndjson`, and `.csv`.</div>
+          <label for="fileInput">Choose file</label><input id="fileInput" type="file">
+          <div class="button-row"><button id="uploadBtn">Upload</button></div>
+        </section>
+        <section class="card">
+          <h3>Current Source</h3>
+          <div class="sidebar-source" id="sidebarSource">No data source selected</div>
+          <div class="helper" id="sidebarSourceDetail">Connect to Elasticsearch or upload a file to begin.</div>
+        </section>
+      </div>
+    </aside>
+    <!-- Main dashboard: metrics, logs, AI analysis, IP reputation, and notes. -->
+    <main class="main">
+      <div class="hero">
+        <div>
+          <div class="muted">Save your time</div>
+          <h2>ATX5 Log Analyzer Dashboard</h2>
+          <div class="source-strip">
+            <div class="source-pill" id="sourcePill">Source: none</div>
+            <div class="source-pill" id="labelPill">Label: No data source selected</div>
+          </div>
+        </div>
+        <div class="status-pill" id="statusPill" data-tone="busy">Loading dashboard</div>
+      </div>
+
+      <!-- Summary cards are also clickable severity filters. -->
+      <section class="stats" aria-label="Log category filters">
+        <button class="stat stat-filter active" type="button" data-severity-filter="" aria-pressed="true"><div class="stat-title">Total Logs</div><div class="stat-value" id="totalLogs">0</div></button>
+        <button class="stat stat-filter" type="button" data-severity-filter="critical" aria-pressed="false"><div class="stat-title">Critical</div><div class="stat-value" id="criticalCount">0</div></button>
+        <button class="stat stat-filter" type="button" data-severity-filter="high" aria-pressed="false"><div class="stat-title">High Risk</div><div class="stat-value" id="highCount">0</div></button>
+        <button class="stat stat-filter" type="button" data-severity-filter="warning" aria-pressed="false"><div class="stat-title">Warnings</div><div class="stat-value" id="warningCount">0</div></button>
+      </section>
+
+      <!-- Primary working area: log list on the left, investigation tools on the right. -->
+      <section class="workspace">
+        <div class="card">
+          <div class="section-head"><h3>Log Results</h3><div class="muted" id="logMeta">Waiting for data</div></div>
+          <div class="toolbar">
+            <input id="searchInput" placeholder="Search messages, IPs, usernames, sources, or host names">
+            <button id="searchBtn">Search</button>
+            <button id="refreshBtn" class="secondary">Refresh</button>
+          </div>
+          <div class="log-list" id="logList"></div>
+        </div>
+
+        <div class="stack">
+          <div class="sticky-side-group">
+            <section class="card">
+              <div class="section-head"><h3>OpenAI Analysis</h3></div>
+              <div class="output-box" id="analysisOutput">Ask OpenAI to summarize the current source or the selected log.</div>
+              <label for="queryInput">Prompt</label>
+              <textarea id="queryInput" placeholder="Example: Summarize the top risks in these logs and tell me what to investigate first."></textarea>
+              <div class="button-row" style="margin-top:12px;"><button id="askBtn">Analyze</button></div>
+              <div class="helper" id="aiStatus" style="margin-top:10px;">OpenAI analysis uses the currently loaded logs.</div>
+            </section>
+
+            <section class="card">
+              <div class="section-head"><h3>AbuseIPDB</h3></div>
+              <div class="helper">Paste a public IP address to check its abuse reputation with the AbuseIPDB API.</div>
+              <label for="abuseIpInput">IP address</label><input id="abuseIpInput" placeholder="102.209.57.78">
+              <div class="button-row"><button id="abuseLookupBtn">Check IP</button></div>
+              <div class="helper abuse-status" id="abuseIpStatus">Add `ABUSEIPDB_API_KEY` to your `.env` file to enable this lookup.</div>
+              <div class="abuse-result" id="abuseIpResult">
+                <div class="empty-state">No IP checked yet.</div>
+              </div>
+            </section>
+          </div>
+
+          <section class="card">
+            <div class="section-head"><h3>Selected Log</h3></div>
+            <div class="detail-grid" id="selectedLog"></div>
+          </section>
+
+          <section class="card">
+            <div class="section-head"><h3>Notes</h3></div>
+            <div class="note-box" id="notesBox">Connect to Elasticsearch or upload logs to begin.</div>
+          </section>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script type="module" src="/static/app.js"></script>
+</body>
+</html>
