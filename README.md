@@ -175,4 +175,4 @@ The purpose of this project is to reduce the manual effort involved in analyzing
 
 ## Author
 
-**Simiyu Chilton Keith**
+**Chilton Keith Simiyu**
