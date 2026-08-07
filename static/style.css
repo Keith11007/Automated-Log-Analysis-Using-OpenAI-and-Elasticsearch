@@ -1,0 +1,327 @@
+:root{
+  /* My themeeeeeeeeeeeeee */
+  --bg:#eef3f8;
+  --panel:#ffffff;
+  --panel-soft:#f7f9fc;
+  --ink:#122033;
+  --muted:#627086;
+  --line:#d9e2ec;
+  --accent:#1d3f63;
+  --accent-soft:#e9f0f8;
+  --blue:#3367b0;
+  --green:#1f7a5a;
+  --amber:#b67a1f;
+  --red:#b64034;
+  --shadow:0 14px 34px rgba(17,24,39,.08);
+}
+
+*{box-sizing:border-box}
+
+
+body{
+  margin:0;
+  color:var(--ink);
+  font-family:"Bahnschrift","Trebuchet MS","Segoe UI",sans-serif;
+  background:
+    radial-gradient(circle at top left,rgba(51,103,176,.08),transparent 22%),
+    linear-gradient(180deg,#f8fbff 0%,var(--bg) 100%);
+}
+
+.shell{min-height:100vh;display:grid;grid-template-columns:320px 1fr}
+.sidebar{padding:28px 22px;background:#f4f7fb;border-right:1px solid var(--line)}
+.main{padding:28px}
+.brand{margin-bottom:24px}
+.brand h1{margin:0 0 10px;font-size:2rem;line-height:1.05}
+.muted,.helper,label{color:var(--muted)}
+.helper{font-size:.92rem;line-height:1.5}
+.stack{display:grid;gap:18px}
+.card,.stat{background:var(--panel);border:1px solid var(--line);border-radius:20px;box-shadow:var(--shadow);padding:18px}
+.card h3{margin:0 0 12px;font-size:1.05rem}
+label{display:block;margin:10px 0 8px;font-size:.92rem}
+
+input,textarea{
+  width:100%;
+  padding:11px 12px;
+  border:1px solid var(--line);
+  border-radius:14px;
+  background:var(--panel-soft);
+  color:var(--ink);
+  font:inherit;
+}
+
+textarea{min-height:110px;resize:vertical}
+.button-row,.toolbar{display:flex;gap:10px;flex-wrap:wrap}
+
+/* buttons*/
+button{
+  border:none;
+  border-radius:999px;
+  padding:11px 16px;
+  font-weight:700;
+  cursor:pointer;
+  color:#fff;
+  background:linear-gradient(135deg,var(--accent),var(--blue));
+}
+
+button.secondary{background:#fff;color:var(--accent);border:1px solid var(--line)}
+button:disabled{opacity:.6;cursor:wait}
+
+/* for my header area above the dashboard workspace. */
+.hero{display:flex;justify-content:space-between;align-items:flex-end;gap:18px;margin-bottom:20px}
+.hero h2{margin:0;font-size:2.4rem;line-height:1.05}
+
+.status-pill,.source-pill{
+  padding:10px 14px;
+  border-radius:999px;
+  font-weight:700;
+  border:1px solid transparent;
+}
+
+
+
+
+.status-pill{background:var(--accent-soft);color:var(--accent)}
+.status-pill[data-tone="error"]{background:#fbeaea;color:var(--red);border-color:#f1c8c3}
+.status-pill[data-tone="busy"]{background:#edf4ff;color:var(--blue);border-color:#d4e2fb}
+.source-strip{display:flex;gap:10px;flex-wrap:wrap;margin-top:10px}
+.source-pill{background:#fff;border-color:var(--line);color:var(--muted)}
+/* for my summary cards double as severity filter buttons. */
+.stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px;margin-bottom:18px}
+.stat-title{color:var(--muted);font-size:.9rem;margin-bottom:10px}
+.stat-value{font-size:1.9rem;font-weight:700}
+
+button.stat-filter{
+  width:100%;
+  text-align:left;
+  color:var(--ink);
+  background:var(--panel);
+  border:1px solid var(--line);
+  border-radius:20px;
+  box-shadow:var(--shadow);
+  padding:18px;
+}
+
+button.stat-filter:hover{border-color:#b9cbe0;transform:translateY(-1px)}
+button.stat-filter.active{border-color:#97b3d4;background:#eef4fb}
+button.stat-filter:focus-visible{outline:3px solid rgba(51,103,176,.25);outline-offset:2px}
+
+/* Main column */
+.workspace{display:grid;grid-template-columns:1.5fr 1fr;gap:18px}
+.sticky-side-group{
+  position:sticky;
+  top:18px;
+  display:grid;
+  gap:18px;
+  max-height:calc(100vh - 36px);
+  overflow:auto;
+  padding-right:4px;
+  scrollbar-gutter:stable;
+}
+.section-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:14px}
+.section-head h3{margin:0}
+.toolbar input{flex:1;border-radius:999px}
+
+/* Log result cards*/
+.log-list,.detail-grid{display:grid;gap:12px}
+
+.log-item{
+  padding:14px 16px;
+  border-radius:16px;
+  border:1px solid var(--line);
+  background:var(--panel-soft);
+  cursor:pointer;
+}
+
+.log-item:hover{border-color:#b9cbe0}
+.log-item.active{border-color:#97b3d4;background:#eef4fb}
+.log-head{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}
+.log-message{margin-top:10px;line-height:1.5}
+.log-meta{display:flex;gap:10px;flex-wrap:wrap;margin-top:10px}
+
+.meta-chip{
+  padding:6px 10px;
+  border-radius:999px;
+  border:1px solid var(--line);
+  background:#fff;
+  color:var(--muted);
+  font-size:.82rem;
+}
+
+.badge{
+  display:inline-flex;
+  align-items:center;
+  padding:5px 10px;
+  border-radius:999px;
+  font-size:.78rem;
+  font-weight:700;
+  text-transform:uppercase;
+  letter-spacing:.04em;
+}
+
+.badge.info{background:#e8f0fb;color:var(--blue)}
+.badge.warning{background:#fff4df;color:var(--amber)}
+.badge.high{background:#fde9e7;color:var(--red)}
+.badge.critical{background:#b64034;color:#fff}
+
+/* panels, notes, and empty states. */
+.detail-block,.note-box,.output-box,.empty-state{
+  padding:14px;
+  border-radius:16px;
+  border:1px solid var(--line);
+  background:var(--panel-soft);
+}
+
+.detail-block h4{margin:0 0 8px;color:var(--muted);font-size:.92rem}
+.empty-state{color:var(--muted)}
+.sidebar-source{font-weight:700;color:var(--accent)}
+.abuse-status{margin-top:12px}
+.abuse-status[data-tone="error"]{color:var(--red)}
+.abuse-status[data-tone="busy"]{color:var(--blue)}
+
+/* AbuseIPDB result card. */
+.abuse-result{
+  display:grid;
+  gap:12px;
+  margin-top:12px;
+}
+
+.abuse-summary{
+  display:grid;
+  grid-template-columns:minmax(0,1fr) auto;
+  gap:12px;
+  align-items:start;
+  padding:14px;
+  border-radius:16px;
+  border:1px solid var(--line);
+  background:var(--panel-soft);
+}
+
+.abuse-summary strong{
+  display:block;
+  line-height:1.45;
+}
+
+.abuse-summary p{
+  margin:8px 0 0;
+  color:var(--muted);
+  line-height:1.5;
+}
+
+.abuse-score{
+  min-width:72px;
+  padding:10px 12px;
+  border-radius:14px;
+  font-size:1.15rem;
+  font-weight:700;
+  text-align:center;
+  background:#edf4ff;
+  color:var(--blue);
+}
+
+.abuse-score[data-level="warning"]{
+  background:#fff4df;
+  color:var(--amber);
+}
+
+.abuse-score[data-level="high"]{
+  background:#fde9e7;
+  color:var(--red);
+}
+
+.abuse-grid{
+  display:grid;
+  gap:10px;
+}
+
+.abuse-kv{
+  padding:12px 14px;
+  border-radius:14px;
+  border:1px solid var(--line);
+  background:#fff;
+}
+
+.abuse-kv span{
+  display:block;
+  margin-bottom:6px;
+  color:var(--muted);
+  font-size:.78rem;
+  font-weight:700;
+  letter-spacing:.04em;
+  text-transform:uppercase;
+}
+
+.abuse-kv strong{
+  display:block;
+  font-size:.95rem;
+  line-height:1.45;
+}
+
+/* OpenAI analysis output */
+.analysis-report{
+  display:grid;
+  gap:12px;
+  line-height:1.65;
+}
+
+.analysis-report h2,
+.analysis-report h3,
+.analysis-report h4,
+.analysis-report h5,
+.analysis-report h6{
+  margin:0;
+  color:var(--accent);
+  font-size:1rem;
+}
+
+.analysis-report p{
+  margin:0;
+}
+
+.analysis-report ol,
+.analysis-report ul{
+  margin:0;
+  padding-left:22px;
+}
+
+.analysis-report li{
+  margin-bottom:8px;
+}
+
+.analysis-report strong{
+  color:#0f2742;
+}
+
+.analysis-report code{
+  padding:2px 6px;
+  border-radius:8px;
+  background:#e7eef8;
+  color:var(--accent);
+  font-family:"Cascadia Code","Consolas",monospace;
+  font-size:.92em;
+}
+
+.analysis-error{
+  padding:14px;
+  border-radius:14px;
+  border:1px solid #f1c8c3;
+  background:#fbeaea;
+  color:var(--red);
+  line-height:1.6;
+}
+
+/* responsiveness just to  keep the dashboard usable on narrow screens. */
+@media (max-width:1180px){
+  .stats,.workspace{grid-template-columns:1fr}
+  .sticky-side-group{
+    position:static;
+    max-height:none;
+    overflow:visible;
+    padding-right:0;
+  }
+}
+
+@media (max-width:920px){
+  .shell{grid-template-columns:1fr}
+  .sidebar{border-right:none;border-bottom:1px solid var(--line)}
+  .hero{flex-direction:column;align-items:flex-start}
+}
