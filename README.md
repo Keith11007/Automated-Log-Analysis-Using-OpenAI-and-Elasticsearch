@@ -47,7 +47,7 @@ and more.
 ### 1. Clone the repository
 
 ```bash
-git clone <your-repository-url>
+git clone https://github.com/Keith11007/Automated-Log-Analysis-Using-OpenAI-and-Elasticsearch.git
 cd Automated-Log-Analysis-Using-OpenAI-and-Elasticsearch
 ```
 
